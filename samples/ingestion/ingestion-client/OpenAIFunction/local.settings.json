@@ -1,0 +1,15 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "ServiceBusConnection_SERVICEBUS": "",
+    "BLOB_CONN": "",
+    "CONTAINER": "json-result-output",
+    "OUTCONTAINER": "openai-result-output",
+    "API_KEY": "",
+    "RESOURCE_ENDPOINT": "",
+    "USE_REDIS":"0",
+    "REDIS_ADDR":"",
+    "PINECODE_KEY":"",
+    "PINECODE_ENV":""
+  }
+}

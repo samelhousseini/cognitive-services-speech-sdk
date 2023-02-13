@@ -334,7 +334,7 @@ samples/js/**/microsoft.cognitiveservices.speech.sdk.bundle*.js*
 samples/objective-c/ios/MicrosoftCognitiveServicesSpeech.framework/
 
 
-samples/ingestion/ingestion-client/OpenAIFunction/local.settings.json
+# samples/ingestion/ingestion-client/OpenAIFunction/local.settings.json
 samples/ingestion/ingestion-client/OpenAIFunction/local.settings copy.json
 samples/ingestion/ingestion-client/OpenAIFunction/.venv/
 samples/ingestion/ingestion-client/OpenAIFunction/OpenAIServiceBusQueueTrigger/data.json
