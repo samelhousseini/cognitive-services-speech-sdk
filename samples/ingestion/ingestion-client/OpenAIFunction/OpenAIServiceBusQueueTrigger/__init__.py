@@ -10,6 +10,7 @@ import smart_open
 import openai
 import pinecone
 import numpy as np
+import time
 
 from redis import Redis
 from redis.commands.search.field import VectorField
@@ -34,17 +35,6 @@ REDIS_ADDR = os.environ["REDIS_ADDR"]
 PINECODE_KEY = os.environ["PINECODE_KEY"]
 PINECODE_ENV = os.environ["PINECODE_ENV"]   
 
-print(USE_REDIS)
-
-if USE_REDIS == "1":
-    port = 6379
-    redis_conn = Redis(host = REDIS_ADDR, port = port)
-    print ('Connected to redis')
-else:
-    pinecone.init(api_key=PINECODE_KEY,environment=PINECODE_ENV)
-    if 'contoso' not in pinecone.list_indexes():
-        pinecone.create_index('contoso', dimension=DAVINCI_EMBED_LEN)    
-    index = pinecone.Index('contoso')
 
 openai.api_type = "azure"
 openai.api_key = API_KEY
@@ -57,6 +47,54 @@ MAX_TOKENS = 750
 
 
 def main(msg: func.ServiceBusMessage):
+
+    print("Using Redis", USE_REDIS)
+    logging.info(f"Using Redis {USE_REDIS}")
+
+    if USE_REDIS == "1":
+        port = 6379
+        redis_conn = Redis(host = REDIS_ADDR, port = port)
+        logging.info('Connected to redis')
+
+        try:
+            out = redis_conn.ft('emb_index').info()
+            logging.info(f"Found Redis Index {out}")
+        except Exception as e:
+            logging.info(e)
+            logging.info("Creating Search Index ###########################################################")
+            def create_search_index (redis_conn,vector_field_name,number_of_vectors, vector_dimensions=512, distance_metric='L2'):
+                M=40
+                EF=200
+                index_name = "emb_index"
+                redis_conn.ft(index_name).create_index([
+                    #VectorField(vector_field_name, "FLAT", {"TYPE": "FLOAT32", "DIM": vector_dimensions, "DISTANCE_METRIC": distance_metric, "INITIAL_CAP": number_of_vectors, "BLOCK_SIZE":number_of_vectors }),
+                    VectorField(vector_field_name, "HNSW", {"TYPE": "FLOAT32", "DIM": vector_dimensions, "DISTANCE_METRIC": distance_metric, "INITIAL_CAP": number_of_vectors, "M": M, "EF_CONSTRUCTION": EF}),
+                    TagField("id"),
+                    TextField("text"),
+                    TextField("summary"),
+                    TagField("timestamp")        
+                ])
+                logging.info("Progress in creating Search Index ###########################################################")
+                #time.sleep(5)
+
+            ITEM_KEYWORD_EMBEDDING_FIELD='item_vector'
+            DAVINCI_EMBED_LEN = 12288
+            NUMBER_PRODUCTS=1000
+
+            #flush all data
+            redis_conn.flushall()
+
+            #create flat index & load vectors
+            create_search_index(redis_conn, ITEM_KEYWORD_EMBEDDING_FIELD,NUMBER_PRODUCTS,DAVINCI_EMBED_LEN,'COSINE')
+            logging.info("Done creating Search Index ###########################################################")
+
+    else:
+        pinecone.init(api_key=PINECODE_KEY,environment=PINECODE_ENV)
+        if 'contoso' not in pinecone.list_indexes():
+            pinecone.create_index('contoso', dimension=DAVINCI_EMBED_LEN)    
+        index = pinecone.Index('contoso')
+
+
     msg_dict = json.loads(msg.get_body().decode('utf-8'))
     logging.info(" ")
     logging.info(type(msg_dict))
@@ -125,15 +163,15 @@ def main(msg: func.ServiceBusMessage):
     # logging.info(f"Text Interrogation: {q}\n", answer,'\n')
 
     if USE_REDIS == "1":
-        redis_upsert_embedding(conversation, summary, data, json_filename)
+        redis_upsert_embedding(redis_conn, conversation, summary, data, json_filename)
         print("Upsert Complete")
-        res = redis_query_embedding_index(conversation, json_filename)
+        res = redis_query_embedding_index(redis_conn, conversation, json_filename)
         print("This is res:", res)
         data['related'] =  res
     else:
-        upsert_embedding(conversation, summary, data, json_filename)
+        upsert_embedding(index, conversation, summary, data, json_filename)
         print("Upsert Complete")
-        res = query_embedding_index(conversation, json_filename)
+        res = query_embedding_index(index, conversation, json_filename)
         print("This is res:", res)
         data['related'] =  res
 
@@ -145,22 +183,25 @@ def main(msg: func.ServiceBusMessage):
 
 
 
-def redis_upsert_embedding(conversation, summary, transcription, transcription_id):
+def redis_upsert_embedding(redis_conn, conversation, summary, transcription, transcription_id):
     res = openai.Embedding.create(input=conversation, engine=EMBEDDING_MODEL, deployment_id=EMBEDDING_MODEL)
     embeds = np.array([res['data'][0]['embedding']]).astype(np.float32).tobytes()
     meta = {'text': conversation, 'summary': summary, 'timestamp': transcription['timeStamp'], ITEM_KEYWORD_EMBEDDING_FIELD:embeds}
     p = redis_conn.pipeline(transaction=False)
     p.hset(transcription_id, mapping=meta)
-    return p.execute()
+    try:
+        p.execute()
+    except Exception as e:
+        print(e)
 
 
-def redis_query_embedding_index(query, transcription_id, topK=5):
+def redis_query_embedding_index(redis_conn, query, transcription_id, topK=5):
     xq = openai.Embedding.create(input=query, engine=EMB_QUERY_MODEL)['data'][0]['embedding']
     query_vector = np.array(xq).astype(np.float32).tobytes()
     q = Query(f'*=>[KNN {topK} @{ITEM_KEYWORD_EMBEDDING_FIELD} $vec_param AS vector_score]').sort_by('vector_score')\
                                 .paging(0,topK).return_fields('vector_score','summary','text','timestamp').dialect(2)
     params_dict = {"vec_param": query_vector}
-    results = redis_conn.ft().search(q, query_params = params_dict)
+    results = redis_conn.ft("emb_index").search(q, query_params = params_dict)
     
     return [{
                 'id':match.id , 
@@ -172,7 +213,7 @@ def redis_query_embedding_index(query, transcription_id, topK=5):
             for match in results.docs if match.id != transcription_id]
 
 
-def upsert_embedding(conversation, summary, transcription, transcription_id):
+def upsert_embedding(index, conversation, summary, transcription, transcription_id):
     res = openai.Embedding.create(input=conversation, engine=EMBEDDING_MODEL, deployment_id=EMBEDDING_MODEL)
     ids = [transcription_id]
     embeds = [res['data'][0]['embedding']]    
@@ -183,7 +224,7 @@ def upsert_embedding(conversation, summary, transcription, transcription_id):
 
 
 
-def query_embedding_index(query, transcription_id):
+def query_embedding_index(index, query, transcription_id):
     xq = openai.Embedding.create(input=query, engine=EMB_QUERY_MODEL)['data'][0]['embedding']
     print(xq[:5])
 
